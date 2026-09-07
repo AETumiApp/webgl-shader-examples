@@ -1,3 +1,25 @@
+# webgl-shader-examples — examples
+
+Self-contained raw-WebGL2 fragment-shader demos. No build step and no
+libraries — just open any `.html` file in a modern browser.
+
+| File | Description |
+| --- | --- |
+| [`gradient-flow.html`](./gradient-flow.html) | Domain-warped flowing gradient on a fullscreen triangle, with a cosine palette and a gentle pointer pull. |
+| [`plasma.html`](./plasma.html) | The classic demoscene plasma effect — layered sines of position and distance folded through a color palette. |
+
+Each demo uses WebGL2, a single fullscreen triangle generated from
+`gl_VertexID` (no vertex buffers), and uniforms for `u_time`, `u_resolution`,
+and `u_mouse`. The device pixel ratio is capped at 2, resize is handled, and a
+`prefers-reduced-motion` guard freezes the animation for viewers who ask for
+less motion.
+
+Part of AETumi's WebGL examples hub: https://aetumi.app/webgl
+
+---
+
+## Example backlog / roadmap
+
 # WebGL Shader Example Backlog
 
 ## Planned examples
