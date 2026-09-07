@@ -84,10 +84,9 @@ Static gradients, images or simplified materials should preserve the design when
 
 ## Repository status
 
-Documentation-first. Planned examples will isolate individual GLSL techniques before combining them into larger visual systems.
+Active. Runnable, production-oriented examples now live in [`examples/`](./examples/) — reviewed for performance (adaptive quality), accessibility, reduced-motion and non-WebGL fallbacks, and clean resource disposal. The set is refined and extended as new patterns land.
 
 See [examples/README.md](./examples/README.md).
-
 ## About AETumi
 
 AETumi helps designers, developers and agencies build high-quality interactive 3D and WebGL experiences with Three.js, Next.js, React, React Three Fiber, MCP and AI coding assistants.
