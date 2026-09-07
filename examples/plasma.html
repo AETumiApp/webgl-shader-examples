@@ -7,6 +7,15 @@
 <style>
   html, body { margin: 0; height: 100%; background: #04060c; overflow: hidden; }
   canvas { display: block; width: 100vw; height: 100vh; }
+  /* Fallback shown when WebGL2 is unavailable or the context is lost for good. */
+  .fallback {
+    position: fixed; inset: 0; display: grid; place-content: center;
+    text-align: center; padding: 24px;
+    color: #cfd2e0; font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: radial-gradient(120% 120% at 70% 30%, #103a4a 0%, #0a1830 45%, #04060c 100%);
+  }
+  .fallback strong { display: block; margin-bottom: .4em; font-size: 1.05rem; color: #fff; }
+  .fallback a { color: #7fd8ff; }
 </style>
 </head>
 <body>
@@ -14,135 +23,209 @@
 <script>
 /*
  * Plasma — raw WebGL2, no libraries.
- * The classic demoscene plasma effect: layered sines of position and distance,
+ * The classic demoscene plasma effect: layered sines of position and distance
  * folded through a cosine palette. Uniforms: u_time, u_resolution, u_mouse.
+ *
+ * Production hardening:
+ *   - devicePixelRatio capped at 2, with adaptive downscale when FPS < 50
+ *     (rolling average) and gradual recovery when the GPU has headroom.
+ *   - Rendering pauses when the canvas scrolls offscreen or the tab is hidden.
+ *   - prefers-reduced-motion freezes on a still, pleasant frame.
+ *   - Full teardown: cancels rAF, removes every listener, deletes the program,
+ *     shaders and VAO, and releases the context. Also survives context loss.
+ *   - Graceful, styled fallback if WebGL2 is not supported.
+ *
  * https://aetumi.app/webgl  (AETumi — AI-native 3D web platform)
  */
 (function () {
   "use strict";
 
-  const canvas = document.getElementById("gl");
-  const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
-  if (!gl) { document.body.innerHTML = "<p style='color:#fff;font:14px sans-serif'>WebGL2 not supported.</p>"; return; }
+  var canvas = document.getElementById("gl");
 
-  // Fullscreen triangle from gl_VertexID — no attribute buffers required.
-  const VERT = `#version 300 es
-  precision highp float;
-  const vec2 verts[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
-  void main() {
-    gl_Position = vec4(verts[gl_VertexID], 0.0, 1.0);
-  }`;
-
-  const FRAG = `#version 300 es
-  precision highp float;
-
-  uniform float u_time;
-  uniform vec2  u_resolution;
-  uniform vec2  u_mouse;     // pixels, origin bottom-left
-
-  out vec4 fragColor;
-
-  vec3 palette(float t) {
-    vec3 a = vec3(0.5);
-    vec3 b = vec3(0.5);
-    vec3 c = vec3(1.0);
-    vec3 d = vec3(0.00, 0.33, 0.67);
-    return a + b * cos(6.28318530718 * (c * t + d));
+  function showFallback(msg) {
+    var el = document.createElement("div");
+    el.className = "fallback";
+    el.innerHTML =
+      "<div><strong>" + msg + "</strong>" +
+      "This demo needs a WebGL2-capable browser. " +
+      'Explore more at <a href="https://aetumi.app/webgl">aetumi.app/webgl</a>.</div>';
+    if (canvas) canvas.replaceWith(el); else document.body.appendChild(el);
   }
 
-  void main() {
-    // Aspect-correct coordinates in [-1, 1] on the short axis.
-    vec2 uv = (gl_FragCoord.xy * 2.0 - u_resolution) / u_resolution.y;
-    vec2 m  = (u_mouse * 2.0 - u_resolution) / u_resolution.y;
+  var gl = canvas && canvas.getContext("webgl2", {
+    antialias: false, alpha: false, powerPreference: "high-performance"
+  });
+  if (!gl) { showFallback("WebGL2 not supported"); return; }
 
-    float t = u_time;
+  // Fullscreen triangle from gl_VertexID — no attribute buffers required.
+  var VERT = "#version 300 es\n" +
+  "precision highp float;\n" +
+  "const vec2 verts[3] = vec2[3](vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));\n" +
+  "void main(){ gl_Position = vec4(verts[gl_VertexID], 0.0, 1.0); }";
 
-    // Classic plasma: sum a handful of sine waves in x, y, and radius.
-    float v = 0.0;
-    v += sin((uv.x * 5.0) + t);
-    v += sin((uv.y * 5.0 + t) * 0.5);
-    v += sin((uv.x * 5.0 + uv.y * 5.0 + t) * 0.5);
-
-    // A moving radial term centered near the pointer.
-    vec2 c = uv - 0.6 * m;
-    float d = length(c) * 4.0;
-    v += sin(d + t * 1.5);
-
-    // A second rotating center keeps it lively.
-    vec2 c2 = uv + vec2(sin(t * 0.4), cos(t * 0.3)) * 0.8;
-    v += sin(length(c2) * 6.0 - t * 1.2);
-
-    v *= 0.5; // normalize the accumulated amplitude
-
-    vec3 col = palette(v * 0.5 + t * 0.05);
-
-    // Lift contrast slightly and settle the edges into the background.
-    col = pow(clamp(col, 0.0, 1.0), vec3(0.85));
-    col *= smoothstep(1.9, 0.1, length(uv)) * 0.35 + 0.7;
-
-    fragColor = vec4(col, 1.0);
-  }`;
+  var FRAG = "#version 300 es\n" +
+  "precision highp float;\n" +
+  "uniform float u_time;\n" +
+  "uniform vec2  u_resolution;\n" +
+  "uniform vec2  u_mouse;     // pixels, origin bottom-left\n" +
+  "out vec4 fragColor;\n" +
+  "vec3 palette(float t){\n" +
+  "  vec3 a = vec3(0.5), b = vec3(0.5), c = vec3(1.0);\n" +
+  "  vec3 d = vec3(0.00, 0.33, 0.67);\n" +
+  "  return a + b * cos(6.28318530718 * (c * t + d));\n" +
+  "}\n" +
+  "void main(){\n" +
+  "  vec2 uv = (gl_FragCoord.xy*2.0 - u_resolution) / u_resolution.y;\n" +
+  "  vec2 m  = (u_mouse*2.0 - u_resolution) / u_resolution.y;\n" +
+  "  float t = u_time;\n" +
+  // Classic plasma: sum sine waves in x, y and the x+y diagonal.
+  "  float v = 0.0;\n" +
+  "  v += sin((uv.x*5.0) + t);\n" +
+  "  v += sin((uv.y*5.0 + t) * 0.5);\n" +
+  "  v += sin((uv.x*5.0 + uv.y*5.0 + t) * 0.5);\n" +
+  // A moving radial term centered near the pointer.
+  "  vec2 cc = uv - 0.6*m;\n" +
+  "  v += sin(length(cc)*4.0 + t*1.5);\n" +
+  // A second rotating center keeps it lively.
+  "  vec2 c2 = uv + vec2(sin(t*0.4), cos(t*0.3)) * 0.8;\n" +
+  "  v += sin(length(c2)*6.0 - t*1.2);\n" +
+  "  v *= 0.5;\n" +
+  "  vec3 col = palette(v*0.5 + t*0.05);\n" +
+  // Lift contrast slightly and settle edges into the background.
+  "  col = pow(clamp(col, 0.0, 1.0), vec3(0.85));\n" +
+  "  col *= smoothstep(1.9, 0.1, length(uv)) * 0.35 + 0.7;\n" +
+  "  fragColor = vec4(col, 1.0);\n" +
+  "}";
 
   function compile(type, src) {
-    const sh = gl.createShader(type);
+    var sh = gl.createShader(type);
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
     if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-      throw new Error(gl.getShaderInfoLog(sh) || "shader compile failed");
+      var log = gl.getShaderInfoLog(sh); gl.deleteShader(sh);
+      throw new Error(log || "shader compile failed");
     }
     return sh;
   }
 
-  const program = gl.createProgram();
-  gl.attachShader(program, compile(gl.VERTEX_SHADER, VERT));
-  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAG));
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    throw new Error(gl.getProgramInfoLog(program) || "program link failed");
-  }
+  var vs, fs, program;
+  try {
+    vs = compile(gl.VERTEX_SHADER, VERT);
+    fs = compile(gl.FRAGMENT_SHADER, FRAG);
+    program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(program) || "program link failed");
+    }
+  } catch (e) { showFallback("Shader failed to build"); return; }
+
   gl.useProgram(program);
+  var vao = gl.createVertexArray(); // required in WebGL2
+  gl.bindVertexArray(vao);
 
-  gl.bindVertexArray(gl.createVertexArray()); // required in WebGL2
+  var uTime  = gl.getUniformLocation(program, "u_time");
+  var uRes   = gl.getUniformLocation(program, "u_resolution");
+  var uMouse = gl.getUniformLocation(program, "u_mouse");
 
-  const uTime = gl.getUniformLocation(program, "u_time");
-  const uRes  = gl.getUniformLocation(program, "u_resolution");
-  const uMouse = gl.getUniformLocation(program, "u_mouse");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var mouse = { x: 0, y: 0 };
+  var quality = 1.0;             // adaptive render-scale multiplier (0.5 .. 1.0)
+  var DPR_CAP = 2;
 
-  const mouse = { x: 0, y: 0 };
-  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+  function dpr() { return Math.min(window.devicePixelRatio || 1, DPR_CAP) * quality; }
 
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2); // cap DPR at 2
-    const w = Math.floor(canvas.clientWidth * dpr);
-    const h = Math.floor(canvas.clientHeight * dpr);
+    var d = dpr();
+    var w = Math.max(1, Math.floor(canvas.clientWidth  * d));
+    var h = Math.max(1, Math.floor(canvas.clientHeight * d));
     if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
+      canvas.width = w; canvas.height = h;
+      gl.viewport(0, 0, w, h);
+      if (!mouse.set) { mouse.x = w * 0.5; mouse.y = h * 0.5; }
     }
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    mouse.x = canvas.width * 0.5;
-    mouse.y = canvas.height * 0.5;
   }
-  window.addEventListener("resize", resize);
-  resize();
 
-  window.addEventListener("pointermove", function (e) {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    mouse.x = e.clientX * dpr;
-    mouse.y = canvas.height - e.clientY * dpr; // flip to bottom-left origin
-  }, { passive: true });
+  function onPointer(e) {
+    var d = dpr();
+    mouse.set = true;
+    mouse.x = e.clientX * d;
+    mouse.y = canvas.height - e.clientY * d; // flip to bottom-left origin
+  }
 
-  const start = performance.now();
+  // ---- Visibility gating ----------------------------------------------------
+  var onScreen = true, pageVisible = !document.hidden, raf = 0, running = false;
+  var io = ("IntersectionObserver" in window)
+    ? new IntersectionObserver(function (es) { onScreen = es[0].isIntersecting; sync(); }, { threshold: 0.01 })
+    : null;
+  if (io) io.observe(canvas);
+  function onVis() { pageVisible = !document.hidden; sync(); }
+
+  // ---- Adaptive quality: rolling FPS ----------------------------------------
+  var frames = 0, fpsClock = 0, lastAdapt = 0;
+  function sampleFps(now) {
+    if (!fpsClock) { fpsClock = now; return; }
+    frames++;
+    var span = now - fpsClock;
+    if (span >= 500) {
+      var fps = (frames * 1000) / span;
+      frames = 0; fpsClock = now;
+      if (now - lastAdapt > 900) {
+        if (fps < 50 && quality > 0.5) { quality = Math.max(0.5, quality - 0.15); resize(); lastAdapt = now; }
+        else if (fps > 58 && quality < 1.0) { quality = Math.min(1.0, quality + 0.1); resize(); lastAdapt = now; }
+      }
+    }
+  }
+
+  var start = performance.now();
   function frame(now) {
-    // Freeze on a still, pleasant frame when reduced motion is requested.
-    const t = reduce.matches ? 12.0 : (now - start) / 1000;
+    raf = requestAnimationFrame(frame);
+    sampleFps(now);
+    // Freeze on a rich, well-composed frame when reduced motion is requested.
+    var t = reduce.matches ? 12.0 : (now - start) / 1000;
     gl.uniform1f(uTime, t);
     gl.uniform2f(uRes, canvas.width, canvas.height);
     gl.uniform2f(uMouse, mouse.x, mouse.y);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    requestAnimationFrame(frame);
   }
-  requestAnimationFrame(frame);
+
+  function sync() {
+    var want = onScreen && pageVisible;
+    if (want && !running) { running = true; fpsClock = 0; frames = 0; raf = requestAnimationFrame(frame); }
+    else if (!want && running) { running = false; cancelAnimationFrame(raf); }
+  }
+
+  // ---- Context loss / restoration -------------------------------------------
+  function onLost(e) { e.preventDefault(); running = false; cancelAnimationFrame(raf); }
+  function onRestored() { location.reload(); }
+
+  // ---- Wire up + teardown ---------------------------------------------------
+  window.addEventListener("resize", resize);
+  window.addEventListener("pointermove", onPointer, { passive: true });
+  document.addEventListener("visibilitychange", onVis);
+  canvas.addEventListener("webglcontextlost", onLost, false);
+  canvas.addEventListener("webglcontextrestored", onRestored, false);
+
+  function dispose() {
+    running = false; cancelAnimationFrame(raf);
+    window.removeEventListener("resize", resize);
+    window.removeEventListener("pointermove", onPointer);
+    document.removeEventListener("visibilitychange", onVis);
+    canvas.removeEventListener("webglcontextlost", onLost);
+    canvas.removeEventListener("webglcontextrestored", onRestored);
+    if (io) io.disconnect();
+    gl.deleteVertexArray(vao);
+    gl.deleteProgram(program);
+    gl.deleteShader(vs); gl.deleteShader(fs);
+    var lose = gl.getExtension("WEBGL_lose_context");
+    if (lose) lose.loseContext();
+  }
+  window.addEventListener("pagehide", dispose, { once: true });
+  window.__plasmaDispose = dispose; // exposed for SPA/hot-reload teardown
+
+  resize();
+  sync();
 })();
 </script>
 </body>
