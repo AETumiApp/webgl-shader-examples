@@ -7,6 +7,15 @@
 <style>
   html, body { margin: 0; height: 100%; background: #05060a; overflow: hidden; }
   canvas { display: block; width: 100vw; height: 100vh; }
+  /* Fallback shown when WebGL2 is unavailable or the context is lost for good. */
+  .fallback {
+    position: fixed; inset: 0; display: grid; place-content: center;
+    text-align: center; padding: 24px;
+    color: #cfd2e0; font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: radial-gradient(120% 120% at 30% 20%, #241a4a 0%, #120c26 45%, #05060a 100%);
+  }
+  .fallback strong { display: block; margin-bottom: .4em; font-size: 1.05rem; color: #fff; }
+  .fallback a { color: #b7a6ff; }
 </style>
 </head>
 <body>
@@ -14,148 +23,216 @@
 <script>
 /*
  * Gradient Flow — raw WebGL2, no libraries.
- * A domain-warped, always-flowing gradient rendered on a single fullscreen
- * triangle. Uniforms: u_time, u_resolution, u_mouse.
+ * A domain-warped, always-flowing luxury gradient rendered on a single
+ * fullscreen triangle. Uniforms: u_time, u_resolution, u_mouse.
+ *
+ * Production hardening:
+ *   - devicePixelRatio capped at 2, with adaptive downscale when FPS < 50
+ *     (rolling average) and gradual recovery when the GPU has headroom.
+ *   - Rendering pauses when the canvas scrolls offscreen or the tab is hidden.
+ *   - prefers-reduced-motion freezes time on a still, pleasant frame.
+ *   - Full teardown: cancels rAF, removes every listener, deletes the program,
+ *     shaders and VAO, and releases the context. Also survives context loss.
+ *   - Graceful, styled fallback if WebGL2 is not supported.
+ *
  * https://aetumi.app/webgl  (AETumi — AI-native 3D web platform)
  */
 (function () {
   "use strict";
 
-  const canvas = document.getElementById("gl");
-  const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
-  if (!gl) { document.body.innerHTML = "<p style='color:#fff;font:14px sans-serif'>WebGL2 not supported.</p>"; return; }
+  var canvas = document.getElementById("gl");
 
-  // A fullscreen triangle: three clip-space verts generated from gl_VertexID,
-  // so we need no vertex buffer at all.
-  const VERT = `#version 300 es
-  precision highp float;
-  const vec2 verts[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
-  void main() {
-    gl_Position = vec4(verts[gl_VertexID], 0.0, 1.0);
-  }`;
-
-  const FRAG = `#version 300 es
-  precision highp float;
-
-  uniform float u_time;
-  uniform vec2  u_resolution;
-  uniform vec2  u_mouse;      // pixels, origin bottom-left
-
-  out vec4 fragColor;
-
-  // Cosine palette (Inigo Quilez). Returns a smooth color for parameter t.
-  vec3 palette(float t) {
-    vec3 a = vec3(0.55, 0.45, 0.65);
-    vec3 b = vec3(0.45, 0.40, 0.45);
-    vec3 c = vec3(1.00, 1.00, 1.00);
-    vec3 d = vec3(0.00, 0.15, 0.35);
-    return a + b * cos(6.28318530718 * (c * t + d));
+  function showFallback(msg) {
+    var el = document.createElement("div");
+    el.className = "fallback";
+    el.innerHTML =
+      "<div><strong>" + msg + "</strong>" +
+      "This demo needs a WebGL2-capable browser. " +
+      'Explore more at <a href="https://aetumi.app/webgl">aetumi.app/webgl</a>.</div>';
+    if (canvas) canvas.replaceWith(el); else document.body.appendChild(el);
   }
 
-  // Cheap value-noise built from a hash, smoothed with a quintic curve.
-  float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-  }
-  float noise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    float a = hash(i);
-    float b = hash(i + vec2(1.0, 0.0));
-    float c = hash(i + vec2(0.0, 1.0));
-    float d = hash(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-  }
+  var gl = canvas && canvas.getContext("webgl2", {
+    antialias: false, alpha: false, powerPreference: "high-performance"
+  });
+  if (!gl) { showFallback("WebGL2 not supported"); return; }
 
-  void main() {
-    // Aspect-correct, centered coordinates in [-1, 1] on the short axis.
-    vec2 uv = (gl_FragCoord.xy * 2.0 - u_resolution) / u_resolution.y;
-    vec2 m  = (u_mouse * 2.0 - u_resolution) / u_resolution.y;
+  // Fullscreen triangle from gl_VertexID — no attribute buffers needed at all.
+  var VERT = "#version 300 es\n" +
+  "precision highp float;\n" +
+  "const vec2 verts[3] = vec2[3](vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));\n" +
+  "void main(){ gl_Position = vec4(verts[gl_VertexID], 0.0, 1.0); }";
 
-    float t = u_time * 0.12;
-
-    // Domain warping: feed noise into itself so the gradient "flows".
-    vec2 q = vec2(noise(uv + t), noise(uv + vec2(5.2, 1.3) - t));
-    vec2 r = vec2(noise(uv + 4.0 * q + vec2(1.7, 9.2) + 0.15 * t),
-                  noise(uv + 4.0 * q + vec2(8.3, 2.8) - 0.12 * t));
-
-    float flow = noise(uv + 4.0 * r);
-
-    // Nudge the flow toward the pointer for a gentle interactive pull.
-    flow += 0.20 * exp(-2.5 * length(uv - m));
-
-    vec3 col = palette(flow + 0.15 * length(r) + t * 0.5);
-
-    // Soft vignette so edges settle into the dark page background.
-    float vig = smoothstep(1.6, 0.2, length(uv));
-    col *= mix(0.65, 1.05, vig);
-
-    fragColor = vec4(col, 1.0);
-  }`;
+  var FRAG = "#version 300 es\n" +
+  "precision highp float;\n" +
+  "uniform float u_time;\n" +
+  "uniform vec2  u_resolution;\n" +
+  "uniform vec2  u_mouse;      // pixels, origin bottom-left\n" +
+  "out vec4 fragColor;\n" +
+  // Cosine palette (Inigo Quilez) — a smooth, tunable jewel-tone gradient.
+  "vec3 palette(float t){\n" +
+  "  vec3 a = vec3(0.55, 0.45, 0.65);\n" +
+  "  vec3 b = vec3(0.45, 0.40, 0.45);\n" +
+  "  vec3 c = vec3(1.00, 1.00, 1.00);\n" +
+  "  vec3 d = vec3(0.00, 0.15, 0.35);\n" +
+  "  return a + b * cos(6.28318530718 * (c * t + d));\n" +
+  "}\n" +
+  // Cheap value-noise from a hash, quintic-smoothed.
+  "float hash(vec2 p){ p = fract(p*vec2(123.34,456.21)); p += dot(p,p+45.32); return fract(p.x*p.y); }\n" +
+  "float noise(vec2 p){\n" +
+  "  vec2 i=floor(p), f=fract(p);\n" +
+  "  vec2 u=f*f*(3.0-2.0*f);\n" +
+  "  float a=hash(i), b=hash(i+vec2(1,0)), c=hash(i+vec2(0,1)), d=hash(i+vec2(1,1));\n" +
+  "  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);\n" +
+  "}\n" +
+  "void main(){\n" +
+  "  vec2 uv = (gl_FragCoord.xy*2.0 - u_resolution) / u_resolution.y;\n" +
+  "  vec2 m  = (u_mouse*2.0 - u_resolution) / u_resolution.y;\n" +
+  "  float t = u_time * 0.12;\n" +
+  // Domain warping: feed noise into itself twice so the gradient "flows".
+  "  vec2 q = vec2(noise(uv + t), noise(uv + vec2(5.2,1.3) - t));\n" +
+  "  vec2 r = vec2(noise(uv + 4.0*q + vec2(1.7,9.2) + 0.15*t),\n" +
+  "                noise(uv + 4.0*q + vec2(8.3,2.8) - 0.12*t));\n" +
+  "  float flow = noise(uv + 4.0*r);\n" +
+  // Gentle interactive pull toward the pointer.
+  "  flow += 0.20 * exp(-2.5 * length(uv - m));\n" +
+  "  vec3 col = palette(flow + 0.15*length(r) + t*0.5);\n" +
+  // Soft vignette so edges settle into the dark page background.
+  "  float vig = smoothstep(1.6, 0.2, length(uv));\n" +
+  "  col *= mix(0.65, 1.05, vig);\n" +
+  "  fragColor = vec4(col, 1.0);\n" +
+  "}";
 
   function compile(type, src) {
-    const sh = gl.createShader(type);
+    var sh = gl.createShader(type);
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
     if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-      throw new Error(gl.getShaderInfoLog(sh) || "shader compile failed");
+      var log = gl.getShaderInfoLog(sh); gl.deleteShader(sh);
+      throw new Error(log || "shader compile failed");
     }
     return sh;
   }
 
-  const program = gl.createProgram();
-  gl.attachShader(program, compile(gl.VERTEX_SHADER, VERT));
-  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAG));
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    throw new Error(gl.getProgramInfoLog(program) || "program link failed");
-  }
+  var vs, fs, program;
+  try {
+    vs = compile(gl.VERTEX_SHADER, VERT);
+    fs = compile(gl.FRAGMENT_SHADER, FRAG);
+    program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(program) || "program link failed");
+    }
+  } catch (e) { showFallback("Shader failed to build"); return; }
+
   gl.useProgram(program);
+  var vao = gl.createVertexArray(); // required in WebGL2 even with no attributes
+  gl.bindVertexArray(vao);
 
-  // A VAO is required to draw in WebGL2 even with no attributes.
-  gl.bindVertexArray(gl.createVertexArray());
+  var uTime  = gl.getUniformLocation(program, "u_time");
+  var uRes   = gl.getUniformLocation(program, "u_resolution");
+  var uMouse = gl.getUniformLocation(program, "u_mouse");
 
-  const uTime = gl.getUniformLocation(program, "u_time");
-  const uRes  = gl.getUniformLocation(program, "u_resolution");
-  const uMouse = gl.getUniformLocation(program, "u_mouse");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var mouse = { x: 0, y: 0 };
+  var quality = 1.0;              // adaptive render-scale multiplier (0.5 .. 1.0)
+  var DPR_CAP = 2;
 
-  const mouse = { x: 0, y: 0 };
-  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+  function dpr() { return Math.min(window.devicePixelRatio || 1, DPR_CAP) * quality; }
 
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2); // cap DPR at 2
-    const w = Math.floor(canvas.clientWidth * dpr);
-    const h = Math.floor(canvas.clientHeight * dpr);
+    var d = dpr();
+    var w = Math.max(1, Math.floor(canvas.clientWidth  * d));
+    var h = Math.max(1, Math.floor(canvas.clientHeight * d));
     if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
+      canvas.width = w; canvas.height = h;
+      gl.viewport(0, 0, w, h);
+      if (!mouse.set) { mouse.x = w * 0.5; mouse.y = h * 0.5; }
     }
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    mouse.x = canvas.width * 0.5;
-    mouse.y = canvas.height * 0.5;
   }
-  window.addEventListener("resize", resize);
-  resize();
 
-  window.addEventListener("pointermove", function (e) {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    mouse.x = e.clientX * dpr;
-    mouse.y = canvas.height - e.clientY * dpr; // flip to bottom-left origin
-  }, { passive: true });
+  function onPointer(e) {
+    var d = dpr();
+    mouse.set = true;
+    mouse.x = e.clientX * d;
+    mouse.y = canvas.height - e.clientY * d; // flip to bottom-left origin
+  }
 
-  const start = performance.now();
+  // ---- Visibility gating: don't burn GPU while hidden or scrolled away. -----
+  var onScreen = true, pageVisible = !document.hidden, raf = 0, running = false;
+  var io = ("IntersectionObserver" in window)
+    ? new IntersectionObserver(function (es) {
+        onScreen = es[0].isIntersecting; sync();
+      }, { threshold: 0.01 })
+    : null;
+  if (io) io.observe(canvas);
+  function onVis() { pageVisible = !document.hidden; sync(); }
+
+  // ---- Adaptive quality: rolling FPS, downscale under 50, recover slowly. ---
+  var frames = 0, fpsClock = 0, lastAdapt = 0;
+  function sampleFps(now) {
+    if (!fpsClock) { fpsClock = now; return; }
+    frames++;
+    var span = now - fpsClock;
+    if (span >= 500) {                 // evaluate twice a second
+      var fps = (frames * 1000) / span;
+      frames = 0; fpsClock = now;
+      if (now - lastAdapt > 900) {
+        if (fps < 50 && quality > 0.5) { quality = Math.max(0.5, quality - 0.15); resize(); lastAdapt = now; }
+        else if (fps > 58 && quality < 1.0) { quality = Math.min(1.0, quality + 0.1); resize(); lastAdapt = now; }
+      }
+    }
+  }
+
+  var start = performance.now();
   function frame(now) {
-    // Freeze time when the viewer prefers reduced motion.
-    const t = reduce.matches ? 0.0 : (now - start) / 1000;
+    raf = requestAnimationFrame(frame);
+    sampleFps(now);
+    var t = reduce.matches ? 0.0 : (now - start) / 1000;
     gl.uniform1f(uTime, t);
     gl.uniform2f(uRes, canvas.width, canvas.height);
     gl.uniform2f(uMouse, mouse.x, mouse.y);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    requestAnimationFrame(frame);
   }
-  requestAnimationFrame(frame);
+
+  function sync() {
+    var want = onScreen && pageVisible;
+    if (want && !running) { running = true; fpsClock = 0; frames = 0; raf = requestAnimationFrame(frame); }
+    else if (!want && running) { running = false; cancelAnimationFrame(raf); }
+  }
+
+  // ---- Context loss / restoration -------------------------------------------
+  function onLost(e) { e.preventDefault(); running = false; cancelAnimationFrame(raf); }
+  function onRestored() { /* program is gone; simplest robust path is a reload */ location.reload(); }
+
+  // ---- Wire up + teardown ---------------------------------------------------
+  window.addEventListener("resize", resize);
+  window.addEventListener("pointermove", onPointer, { passive: true });
+  document.addEventListener("visibilitychange", onVis);
+  canvas.addEventListener("webglcontextlost", onLost, false);
+  canvas.addEventListener("webglcontextrestored", onRestored, false);
+
+  function dispose() {
+    running = false; cancelAnimationFrame(raf);
+    window.removeEventListener("resize", resize);
+    window.removeEventListener("pointermove", onPointer);
+    document.removeEventListener("visibilitychange", onVis);
+    canvas.removeEventListener("webglcontextlost", onLost);
+    canvas.removeEventListener("webglcontextrestored", onRestored);
+    if (io) io.disconnect();
+    gl.deleteVertexArray(vao);
+    gl.deleteProgram(program);
+    gl.deleteShader(vs); gl.deleteShader(fs);
+    var lose = gl.getExtension("WEBGL_lose_context");
+    if (lose) lose.loseContext();
+  }
+  window.addEventListener("pagehide", dispose, { once: true });
+  window.__gradientFlowDispose = dispose; // exposed for SPA/hot-reload teardown
+
+  resize();
+  sync();
 })();
 </script>
 </body>
