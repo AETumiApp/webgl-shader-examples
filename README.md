@@ -102,3 +102,14 @@ Production-ready 3D web you can own the source of — from [AETumi](https://aetu
 - [React Three Fiber components & examples](https://aetumi.app/react-three-fiber/)
 
 Build 3D web directly from your AI assistant with the [AETumi MCP for AI coding](https://aetumi.app/mcp/) — `claude mcp add --transport http aetumi https://mcp.aetumi.app`
+
+## Live demos — AETumi Labs
+
+First-party, interactive references built on this technique — open, orbit and inspect:
+
+- [PULSE — audio-reactive GPU particle field](https://aetumi.app/labs/music/)
+- [DRAPE — GPU silk / cloth deformation](https://aetumi.app/labs/fashion/)
+- [LEDGER — data & network visualization globe](https://aetumi.app/labs/fintech/)
+
+Browse all: [AETumi Labs](https://aetumi.app/labs/)
+
